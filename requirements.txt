@@ -1,0 +1,23 @@
+# Core 3D geometry and mesh processing
+trimesh>=3.15.0
+
+# 3D rendering engine
+pyrender>=0.1.45
+
+# Image processing
+Pillow>=9.0.0
+
+# Numerical computing
+numpy>=1.21.0
+
+# OpenGL support for headless rendering
+PyOpenGL>=3.1.0
+PyOpenGL-accelerate>=3.1.0
+
+# EGL support for headless rendering (Linux)
+# Note: On some systems you may need to install mesa-utils and libegl1-mesa-dev
+
+# GUI dependencies (for gui_app.py)
+# tkinter is included with Python standard library
+# Additional GUI enhancements (optional)
+# tkinter-tooltip>=2.0.0  # Uncomment for enhanced tooltips
