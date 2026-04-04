@@ -171,9 +171,20 @@ class VehicleGeneratorGUI:
                                  values=[256, 512, 1024], state="readonly", width=22)
         size_combo.grid(row=6, column=1, padx=5, pady=2)
         
+        # Animations
+        ttk.Label(editor_frame, text="Animations:").grid(row=7, column=0, sticky=tk.NW, padx=5, pady=2)
+        anim_frame = ttk.Frame(editor_frame)
+        anim_frame.grid(row=7, column=1, padx=5, pady=2, sticky=tk.W)
+
+        self.anim_vars = {}
+        for anim_name in ("idle", "firing", "moving"):
+            var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(anim_frame, text=anim_name.title(), variable=var).pack(anchor=tk.W)
+            self.anim_vars[anim_name] = var
+
         # Update button
-        ttk.Button(editor_frame, text="Update Vehicle", command=self.update_vehicle).grid(row=7, column=0, columnspan=2, pady=10)
-        
+        ttk.Button(editor_frame, text="Update Vehicle", command=self.update_vehicle).grid(row=8, column=0, columnspan=2, pady=10)
+
         # Bind change events
         for var in self.editor_vars.values():
             if isinstance(var, (tk.StringVar, tk.IntVar)):
@@ -277,6 +288,10 @@ class VehicleGeneratorGUI:
         self.current_secondary_color = spec.secondary_color
         self.update_color_button()
         self.update_secondary_color_button()
+        # Animation checkboxes
+        selected = spec.animations or []
+        for name, var in self.anim_vars.items():
+            var.set(name in selected)
     
     def update_color_button(self):
         """Update the primary color button appearance"""
@@ -335,10 +350,11 @@ class VehicleGeneratorGUI:
                 vehicle_type=original.vehicle_type,
                 seed=original.seed + 1,
                 color=original.color,
-                secondary_color=original.secondary_color,  # Include secondary color!
+                secondary_color=original.secondary_color,
                 n_dirs=original.n_dirs,
                 cell=original.cell,
                 generate_debug=original.generate_debug,
+                animations=list(original.animations) if original.animations else None,
                 custom_params=original.custom_params.copy() if original.custom_params else None
             )
             self.vehicle_specs.append(duplicate)
@@ -359,7 +375,9 @@ class VehicleGeneratorGUI:
             spec.n_dirs = self.editor_vars['n_dirs'].get()
             spec.cell = self.editor_vars['cell'].get()
             spec.generate_debug = self.generate_debug.get()
-            
+            selected_anims = [n for n, v in self.anim_vars.items() if v.get()]
+            spec.animations = selected_anims if selected_anims else None
+
             self.refresh_vehicle_list()
             self.vehicle_listbox.selection_set(idx)
     
@@ -572,6 +590,7 @@ class VehicleGeneratorGUI:
                         "cell": spec.cell,
                         "generate_debug": spec.generate_debug,
                         "export_3d": spec.export_3d,
+                        "animations": spec.animations,
                         "custom_params": spec.custom_params
                     })
                 
@@ -605,6 +624,7 @@ class VehicleGeneratorGUI:
                         cell=item.get("cell", 512),
                         generate_debug=item.get("generate_debug", True),
                         export_3d=item.get("export_3d", False),
+                        animations=item.get("animations"),
                         custom_params=item.get("custom_params")
                     )
                     self.vehicle_specs.append(spec)

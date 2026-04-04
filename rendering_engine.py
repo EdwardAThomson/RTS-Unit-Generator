@@ -6,7 +6,7 @@ This module handles all 3D to 2D rendering, sprite sheet generation, and export 
 import os
 import json
 import math
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import trimesh
 import pyrender
@@ -286,6 +286,120 @@ class VehicleRenderer:
         
         return paths
     
+    def render_animated_directions(self, colored_parts: 'ColoredVehicleParts',
+                                    out_dir: str, basename: str,
+                                    primary_rgba: Tuple[float, float, float, float],
+                                    secondary_rgba: Tuple[float, float, float, float],
+                                    n_dirs: int = 8, img_size: int = 512,
+                                    animation_sequence: Optional['AnimationSequence'] = None) -> List[str]:
+        """Render vehicle from multiple directions with per-frame animation.
+
+        For each direction and each animation frame the relevant part groups
+        are transformed according to their keyframes *before* the directional
+        rotation is applied, so that e.g. barrel recoil is always along the
+        barrel axis.
+
+        Returns a flat list of frame paths ordered as:
+          [dir0_frame0, dir0_frame1, ..., dir0_frameN, dir1_frame0, ...]
+        """
+        from animation_definitions import AnimationSequence  # local import to avoid circular
+
+        if animation_sequence is None:
+            animation_sequence = AnimationSequence(name="idle", n_frames=1)
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        paths: List[str] = []
+        total = n_dirs * animation_sequence.n_frames
+
+        for dir_idx in range(n_dirs):
+            az_rad = math.radians((360.0 / n_dirs) * dir_idx)
+            dir_rotation = trimesh.transformations.rotation_matrix(az_rad, [0, 0, 1])
+
+            for frame_idx in range(animation_sequence.n_frames):
+                keyframes = animation_sequence.get_keyframes_for_frame(frame_idx)
+
+                # Build a lookup: part_group -> transform matrix
+                anim_transforms: Dict[str, np.ndarray] = {}
+                for kf in keyframes:
+                    mat = np.eye(4)
+                    tx, ty, tz = kf.translation
+                    if abs(tx) + abs(ty) + abs(tz) > 1e-9:
+                        mat[:3, 3] = [tx, ty, tz]
+                    if abs(kf.rotation_angle) > 1e-9:
+                        rot = trimesh.transformations.rotation_matrix(
+                            kf.rotation_angle, kf.rotation_axis
+                        )
+                        mat = rot @ mat
+                    anim_transforms[kf.part_group] = mat
+
+                # ---- Build scene ----
+                scene = pyrender.Scene(bg_color=self.config.background_color)
+
+                # Helper: copy parts, apply optional anim transform, then dir rotation, add to scene
+                def _add_parts(parts, rgba, group_name=None):
+                    if not parts:
+                        return
+                    combined = trimesh.util.concatenate([p.copy() for p in parts])
+                    if group_name and group_name in anim_transforms:
+                        combined.apply_transform(anim_transforms[group_name])
+                    combined.apply_transform(dir_rotation)
+                    mat = pyrender.MetallicRoughnessMaterial(
+                        baseColorFactor=rgba, metallicFactor=0.0, roughnessFactor=1.0
+                    )
+                    scene.add(pyrender.Mesh.from_trimesh(combined, material=mat))
+
+                # Primary hull parts (no animation)
+                _add_parts(colored_parts.primary_parts, primary_rgba)
+
+                # Secondary hull parts that are NOT in any animated group
+                _add_parts(colored_parts.get_secondary_hull_parts(), secondary_rgba)
+
+                # Animated groups
+                _add_parts(colored_parts.turret_parts, secondary_rgba, "turret_parts")
+                _add_parts(colored_parts.barrel_parts, secondary_rgba, "barrel_parts")
+                _add_parts(colored_parts.mobility_parts, secondary_rgba, "mobility_parts")
+
+                # Lighting
+                light = pyrender.DirectionalLight(intensity=self.config.light_intensity)
+                light_pose = np.array([
+                    [1, 0, 0, self.config.light_position[0]],
+                    [0, 1, 0, self.config.light_position[1]],
+                    [0, 0, 1, self.config.light_position[2]],
+                    [0, 0, 0, 1]
+                ])
+                scene.add(light, pose=light_pose)
+
+                # Camera
+                camera = pyrender.OrthographicCamera(
+                    xmag=self.config.ortho_mag, ymag=self.config.ortho_mag,
+                    znear=self.config.znear, zfar=self.config.zfar
+                )
+                elev_rad = math.radians(self.config.elevation_deg)
+                camera_pose = np.array([
+                    [1, 0, 0, 0],
+                    [0, math.cos(elev_rad), -math.sin(elev_rad), self.config.camera_y_offset],
+                    [0, math.sin(elev_rad), math.cos(elev_rad), self.config.camera_distance],
+                    [0, 0, 0, 1]
+                ])
+                scene.add(camera, pose=camera_pose)
+
+                # Render
+                renderer = pyrender.OffscreenRenderer(img_size, img_size)
+                color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+                renderer.delete()
+
+                if dir_idx == 0 and frame_idx == 0:
+                    non_bg = np.sum(np.any(color[:, :, :3] > [3, 3, 3], axis=2))
+                    print(f"✓ Rendering {basename} ({animation_sequence.name}): "
+                          f"{non_bg} vehicle pixels, {total} total frames")
+
+                fp = os.path.join(out_dir, f"{basename}_{dir_idx:02d}_{frame_idx:02d}.png")
+                Image.fromarray(color, "RGBA").save(fp)
+                paths.append(fp)
+
+        return paths
+
     def _add_coordinate_axes(self, scene: pyrender.Scene, rotation_matrix: np.ndarray, axis_length: float = 8.0):
         """Add coordinate axes to the scene for reference (X=red, Y=green, Z=blue)"""
         # Create axes as visible cylinders (scaled for vehicle size)
@@ -592,7 +706,39 @@ class SpriteSheetGenerator:
         sheet.save(out_path)
     
     @staticmethod
-    def generate_metadata(name: str, vehicle_type: str, n_dirs: int, cell: int, 
+    def make_animated_sprite_sheet(animation_frames: Dict[str, List[str]],
+                                   animation_order: List[str],
+                                   out_path: str, n_dirs: int, cell: int, pad: int = 0):
+        """Create a sprite sheet with one row per animation.
+
+        *animation_frames* maps animation name -> flat list of frame paths
+        ordered as [dir0_f0, dir0_f1, ..., dir0_fN, dir1_f0, ...].
+
+        The sheet width is determined by the animation with the most frames
+        (n_dirs * n_frames_of_that_animation).  Shorter rows are left-padded
+        with transparency.
+        """
+        # Determine sheet dimensions
+        max_cols = max(len(frames) for frames in animation_frames.values())
+        n_rows = len(animation_frames)
+        W = max_cols * cell + max(max_cols - 1, 0) * pad
+        H = n_rows * cell + max(n_rows - 1, 0) * pad
+        sheet = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+        for row_idx, anim_name in enumerate(animation_order):
+            frames = animation_frames[anim_name]
+            for col_idx, fp in enumerate(frames):
+                img = Image.open(fp).convert("RGBA")
+                if img.size != (cell, cell):
+                    img = img.resize((cell, cell), Image.NEAREST)
+                x = col_idx * (cell + pad)
+                y = row_idx * (cell + pad)
+                sheet.paste(img, (x, y), img)
+
+        sheet.save(out_path)
+
+    @staticmethod
+    def generate_metadata(name: str, vehicle_type: str, n_dirs: int, cell: int,
                          color: Tuple[int, int, int], vehicle_metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Generate metadata JSON for the sprite sheet"""
         base_meta = {
@@ -605,8 +751,41 @@ class SpriteSheetGenerator:
             "color": color,
             "vehicle_type": vehicle_type
         }
-        
+
         # Merge with vehicle-specific metadata
+        base_meta.update(vehicle_metadata)
+        return base_meta
+
+    @staticmethod
+    def generate_animated_metadata(name: str, vehicle_type: str, n_dirs: int, cell: int,
+                                    color: Tuple[int, int, int],
+                                    vehicle_metadata: Dict[str, Any],
+                                    animation_info: List[Tuple[str, int, bool]]) -> Dict[str, Any]:
+        """Generate metadata for an animated sprite sheet.
+
+        *animation_info* is a list of (name, n_frames, looping) tuples in
+        row order.
+        """
+        direction_labels = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        animations = {}
+        for row_idx, (anim_name, n_frames, looping) in enumerate(animation_info):
+            animations[anim_name] = {
+                "row": row_idx,
+                "frames": n_frames,
+                "looping": looping,
+            }
+
+        base_meta = {
+            "name": name,
+            "directions": n_dirs,
+            "framesPerDirection": 1,   # backward-compat (idle row)
+            "frameWidth": cell,
+            "frameHeight": cell,
+            "order": direction_labels[:n_dirs],
+            "color": color,
+            "vehicle_type": vehicle_type,
+            "animations": animations,
+        }
         base_meta.update(vehicle_metadata)
         return base_meta
 
@@ -696,74 +875,113 @@ class VehicleExporter:
     def export_vehicle(self, mesh: trimesh.Trimesh, name: str, vehicle_type: str,
                       color: Tuple[int, int, int], vehicle_metadata: Dict[str, Any],
                       out_root="out/vehicles", n_dirs=8, cell=512, generate_debug=True,
-                      secondary_color: Tuple[int, int, int] = None, colored_parts: ColoredVehicleParts = None,
-                      export_3d: bool = False):
-        """Export a complete vehicle with sprite sheet and metadata"""
-        
+                      secondary_color: Tuple[int, int, int] = None,
+                      colored_parts: 'ColoredVehicleParts' = None,
+                      export_3d: bool = False,
+                      animation_set: Optional[Any] = None):
+        """Export a complete vehicle with sprite sheet and metadata.
+
+        When *animation_set* is provided the sprite sheet will contain one row
+        per animation sequence, rendered via `render_animated_directions`.
+        """
         frames_dir = os.path.join(out_root, name, "frames")
-        
-        # Use two-color rendering if colored parts are provided
-        if colored_parts is not None and secondary_color is not None:
-            # Convert colors to RGBA
-            primary_rgba = color_to_rgba(color, 1.0)
-            secondary_rgba = color_to_rgba(secondary_color, 1.0)
-            
-            # Render with two colors
-            frames = self.renderer.render_colored_directions(
-                colored_parts, frames_dir, basename=name,
-                primary_rgba=primary_rgba, secondary_rgba=secondary_rgba,
-                n_dirs=n_dirs, img_size=cell
+        primary_rgba = color_to_rgba(color, 1.0) if secondary_color else None
+        secondary_rgba = color_to_rgba(secondary_color, 1.0) if secondary_color else None
+
+        # ----- Render frames -----
+        has_animations = (animation_set is not None
+                          and colored_parts is not None
+                          and secondary_color is not None)
+
+        if has_animations:
+            # Animated: render each sequence into its own sub-dir
+            ordered_seqs = animation_set.get_ordered_sequences()
+            animation_frames: Dict[str, List[str]] = {}
+            animation_order: List[str] = []
+
+            for seq in ordered_seqs:
+                seq_dir = os.path.join(frames_dir, seq.name)
+                frame_paths = self.renderer.render_animated_directions(
+                    colored_parts, seq_dir, basename=f"{name}_{seq.name}",
+                    primary_rgba=primary_rgba, secondary_rgba=secondary_rgba,
+                    n_dirs=n_dirs, img_size=cell,
+                    animation_sequence=seq,
+                )
+                animation_frames[seq.name] = frame_paths
+                animation_order.append(seq.name)
+
+            # Build animated sprite sheet
+            sheet_path = os.path.join(out_root, name, f"{name}_sheet.png")
+            self.sprite_generator.make_animated_sprite_sheet(
+                animation_frames, animation_order, sheet_path,
+                n_dirs=n_dirs, cell=cell,
             )
+
+            # Metadata
+            anim_info = [(seq.name, seq.n_frames, seq.looping) for seq in ordered_seqs]
+            metadata = self.sprite_generator.generate_animated_metadata(
+                name, vehicle_type, n_dirs, cell, color, vehicle_metadata, anim_info,
+            )
+            # Collect all frame paths flat for the result dict
+            all_frames = []
+            for anim_name in animation_order:
+                all_frames.extend(animation_frames[anim_name])
+
         else:
-            # Fallback to single-color rendering
-            rgba = color_to_rgba(color, 1.0)
-            frames = self.renderer.render_directions(
-                mesh, frames_dir, basename=name,
-                n_dirs=n_dirs, img_size=cell, base_rgba=rgba
+            # Static (original behaviour)
+            if colored_parts is not None and secondary_color is not None:
+                frames = self.renderer.render_colored_directions(
+                    colored_parts, frames_dir, basename=name,
+                    primary_rgba=primary_rgba, secondary_rgba=secondary_rgba,
+                    n_dirs=n_dirs, img_size=cell,
+                )
+            else:
+                rgba = color_to_rgba(color, 1.0)
+                frames = self.renderer.render_directions(
+                    mesh, frames_dir, basename=name,
+                    n_dirs=n_dirs, img_size=cell, base_rgba=rgba,
+                )
+
+            sheet_path = os.path.join(out_root, name, f"{name}_sheet.png")
+            self.sprite_generator.make_sprite_sheet(frames, sheet_path, cols=n_dirs, cell=cell, pad=0)
+
+            metadata = self.sprite_generator.generate_metadata(
+                name, vehicle_type, n_dirs, cell, color, vehicle_metadata,
             )
-        
-        # Generate debug views if requested
+            all_frames = frames
+
+        # ----- Debug views (always static) -----
+        debug_dir = None
         if generate_debug:
             debug_dir = os.path.join(out_root, name, "debug_views")
             if colored_parts is not None and secondary_color is not None:
-                # Use two-color debug views
                 primary_rgba = color_to_rgba(color, 1.0)
                 secondary_rgba = color_to_rgba(secondary_color, 1.0)
                 self.renderer.generate_colored_debug_views(
                     colored_parts, debug_dir, basename=name,
                     primary_rgba=primary_rgba, secondary_rgba=secondary_rgba,
-                    img_size=cell
+                    img_size=cell,
                 )
             else:
-                # Fallback to single-color debug views
                 debug_mesh = colored_parts.get_combined_mesh() if colored_parts else mesh
                 debug_rgba = color_to_rgba(color, 1.0)
                 self.renderer.generate_debug_views(
                     debug_mesh, debug_dir, basename=name,
-                    img_size=cell, base_rgba=debug_rgba
+                    img_size=cell, base_rgba=debug_rgba,
                 )
-        
-        # Create sprite sheet
-        sheet_path = os.path.join(out_root, name, f"{name}_sheet.png")
-        self.sprite_generator.make_sprite_sheet(frames, sheet_path, cols=n_dirs, cell=cell, pad=0)
-        
-        # Generate and save metadata
-        metadata = self.sprite_generator.generate_metadata(
-            name, vehicle_type, n_dirs, cell, color, vehicle_metadata
-        )
-        
-        # Export 3D meshes if requested
+
+        # ----- 3D mesh export -----
         mesh_result = {}
         if export_3d and colored_parts is not None:
             sec_color = secondary_color if secondary_color is not None else (160, 160, 160)
             mesh_result = self.export_3d_mesh(
                 colored_parts, name,
-                primary_color=color,
-                secondary_color=sec_color,
-                out_root=out_root
+                primary_color=color, secondary_color=sec_color,
+                out_root=out_root,
             )
             metadata["meshes"] = mesh_result
 
+        # ----- Write metadata -----
         metadata_path = os.path.join(out_root, name, f"{name}.json")
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
@@ -771,7 +989,7 @@ class VehicleExporter:
         return {
             "sprite_sheet": sheet_path,
             "metadata": metadata_path,
-            "frames": frames,
-            "debug_dir": debug_dir if generate_debug else None,
-            **mesh_result
+            "frames": all_frames,
+            "debug_dir": debug_dir,
+            **mesh_result,
         }

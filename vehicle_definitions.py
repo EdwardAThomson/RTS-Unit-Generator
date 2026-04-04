@@ -96,6 +96,11 @@ class ColoredVehicleParts:
     def get_mobility_mesh(self) -> trimesh.Trimesh:
         return trimesh.util.concatenate(self.mobility_parts) if self.mobility_parts else None
 
+    def get_secondary_hull_parts(self) -> List[trimesh.Trimesh]:
+        """Secondary parts that are NOT in any animated group."""
+        excluded = self._exclude(self.turret_parts, self.barrel_parts, self.mobility_parts)
+        return [p for p in self.secondary_parts if id(p) not in excluded]
+
 
 # ---------- Vehicle base class ----------
 @dataclass
