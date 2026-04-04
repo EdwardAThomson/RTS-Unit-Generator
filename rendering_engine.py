@@ -622,18 +622,19 @@ class VehicleExporter:
     def export_3d_mesh(self, colored_parts: 'ColoredVehicleParts', name: str,
                        primary_color: tuple, secondary_color: tuple,
                        out_root: str = "out/vehicles") -> dict:
-        """Export vehicle as GLB files with proper materials and colors.
+        """Export vehicle as separate GLB files for game-engine animation.
 
-        Produces:
-          - <name>.glb          combined mesh (hull + turret)
-          - <name>_hull.glb     hull-only mesh
-          - <name>_turret.glb   turret-only mesh (if the vehicle has one)
+        Produces (when parts exist):
+          - <name>.glb              combined mesh (for previewing)
+          - <name>_hull.glb         body + any non-animated detail parts
+          - <name>_turret.glb       turret base (rotates to aim)
+          - <name>_barrel.glb       gun barrel (recoils on firing)
+          - <name>_mobility.glb     wheels / treads (spin with movement)
         """
         mesh_dir = os.path.join(out_root, name, "meshes")
         os.makedirs(mesh_dir, exist_ok=True)
 
         def _apply_vertex_color(mesh_obj, color_rgb):
-            """Assign a solid vertex color (0-255 RGBA) to every vertex."""
             r, g, b = color_rgb
             n_verts = len(mesh_obj.vertices)
             mesh_obj.visual = trimesh.visual.ColorVisuals(
@@ -643,7 +644,6 @@ class VehicleExporter:
             return mesh_obj
 
         def _build_colored_scene(parts_primary, parts_secondary):
-            """Combine primary + secondary parts into a single scene with colors."""
             scene = trimesh.Scene()
             for i, part in enumerate(parts_primary):
                 colored = _apply_vertex_color(part.copy(), primary_color)
@@ -653,32 +653,43 @@ class VehicleExporter:
                 scene.add_geometry(colored, node_name=f"secondary_{i}")
             return scene
 
+        def _export_part(mesh_obj, suffix, color):
+            if mesh_obj is None:
+                return None
+            _apply_vertex_color(mesh_obj, color)
+            path = os.path.join(mesh_dir, f"{name}_{suffix}.glb")
+            mesh_obj.export(path)
+            return path
+
         result = {}
 
-        # --- Combined mesh (everything) ---
+        # Combined mesh (everything, for previewing in Blender etc.)
         combined_scene = _build_colored_scene(
             colored_parts.primary_parts, colored_parts.secondary_parts
         )
         combined_path = os.path.join(mesh_dir, f"{name}.glb")
         combined_scene.export(combined_path)
         result["combined_glb"] = combined_path
-        print(f"  3D mesh exported: {combined_path}")
 
-        # --- Hull mesh (body + treads/wheels, no turret) ---
-        hull_mesh = colored_parts.get_hull_mesh()
-        if hull_mesh is not None:
-            _apply_vertex_color(hull_mesh, primary_color)
-            hull_path = os.path.join(mesh_dir, f"{name}_hull.glb")
-            hull_mesh.export(hull_path)
+        # Individual animated parts
+        hull_path = _export_part(colored_parts.get_hull_mesh(), "hull", primary_color)
+        if hull_path:
             result["hull_glb"] = hull_path
 
-        # --- Turret mesh (for independent rotation) ---
-        turret_mesh = colored_parts.get_turret_mesh()
-        if turret_mesh is not None:
-            _apply_vertex_color(turret_mesh, secondary_color)
-            turret_path = os.path.join(mesh_dir, f"{name}_turret.glb")
-            turret_mesh.export(turret_path)
+        turret_path = _export_part(colored_parts.get_turret_mesh(), "turret", secondary_color)
+        if turret_path:
             result["turret_glb"] = turret_path
+
+        barrel_path = _export_part(colored_parts.get_barrel_mesh(), "barrel", secondary_color)
+        if barrel_path:
+            result["barrel_glb"] = barrel_path
+
+        mobility_path = _export_part(colored_parts.get_mobility_mesh(), "mobility", secondary_color)
+        if mobility_path:
+            result["mobility_glb"] = mobility_path
+
+        exported = [k.replace("_glb", ".glb") for k in result]
+        print(f"  3D meshes exported ({len(exported)} files): {mesh_dir}")
 
         return result
 
