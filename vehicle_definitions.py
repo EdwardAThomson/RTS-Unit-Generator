@@ -48,11 +48,31 @@ class ColoredVehicleParts:
     """Container for vehicle parts with different colors"""
     primary_parts: List[trimesh.Trimesh]  # Main hull parts (user-selected color)
     secondary_parts: List[trimesh.Trimesh]  # Detail parts (grey)
-    
+    turret_parts: List[trimesh.Trimesh] = None  # Turret parts (exported separately for 3D games)
+
+    def __post_init__(self):
+        if self.turret_parts is None:
+            self.turret_parts = []
+
     def get_combined_mesh(self) -> trimesh.Trimesh:
         """Combine all parts into a single mesh"""
         all_parts = self.primary_parts + self.secondary_parts
         return trimesh.util.concatenate(all_parts)
+
+    def get_hull_mesh(self) -> trimesh.Trimesh:
+        """Get combined hull mesh (everything except turret)"""
+        hull_parts = self.primary_parts + [
+            p for p in self.secondary_parts if p not in self.turret_parts
+        ]
+        if not hull_parts:
+            return None
+        return trimesh.util.concatenate(hull_parts)
+
+    def get_turret_mesh(self) -> trimesh.Trimesh:
+        """Get combined turret mesh (for independent rotation in 3D games)"""
+        if not self.turret_parts:
+            return None
+        return trimesh.util.concatenate(self.turret_parts)
 
 
 # ---------- Vehicle base class ----------
@@ -151,22 +171,25 @@ class TankBuilder(VehicleBuilder):
         secondary_parts.append(barrel)
         
         # Add treads if requested (secondary color)
+        # Track turret parts for separate 3D export
+        turret_parts = [turret, barrel]
+
         if params.include_treads:
             tw = 0.3 * params.scale_factor
             tread_len = L * 0.9
             # tread_h already calculated above
-            
+
             treadL = box(tread_len, tw, tread_h)
             treadR = box(tread_len, tw, tread_h)
-            
+
             track_y_offset = W/2 + tw/2 * 0.7
             track_z_offset = 0  # Tread center at ground level (hull is now raised)
-            
+
             treadL.apply_translation([0, track_y_offset, track_z_offset])
             treadR.apply_translation([0, -track_y_offset, track_z_offset])
             secondary_parts.extend([treadL, treadR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+
+        return ColoredVehicleParts(primary_parts, secondary_parts, turret_parts)
     
     def get_metadata(self, params: TankParameters) -> Dict[str, Any]:
         """Get tank-specific metadata"""
@@ -235,26 +258,29 @@ class APCBuilder(VehicleBuilder):
         weapon.apply_translation([L*0.2 + tr*0.8 + bl/2, 0, H/2 + th/2 + wr])  # Also raised
         secondary_parts.append(weapon)
         
+        # Track turret parts for separate 3D export
+        turret_parts = [turret, weapon]
+
         # Add wheels if requested (secondary color)
         if params.include_wheels:
             wheel_spacing = L / (params.num_wheels_per_side + 1)
-            
+
             for i in range(params.num_wheels_per_side):
                 x_pos = -L/2 + wheel_spacing * (i + 1)
                 # Position wheels so bottom touches ground (now that hull is raised)
                 z_pos = 0  # Wheel center at ground level (hull is now raised by wr)
-                
+
                 # Left side wheels
                 wheelL = cylinder(wr, 0.2 * params.scale_factor, axis='y')
                 wheelL.apply_translation([x_pos, W/2 + 0.1 * params.scale_factor, z_pos])
-                
+
                 # Right side wheels
                 wheelR = cylinder(wr, 0.2 * params.scale_factor, axis='y')
                 wheelR.apply_translation([x_pos, -W/2 - 0.1 * params.scale_factor, z_pos])
-                
+
                 secondary_parts.extend([wheelL, wheelR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+
+        return ColoredVehicleParts(primary_parts, secondary_parts, turret_parts)
     
     def get_metadata(self, params: APCParameters) -> Dict[str, Any]:
         """Get APC-specific metadata"""
@@ -368,23 +394,26 @@ class ArtilleryBuilder(VehicleBuilder):
         muzzle_brake.apply_translation([muzzle_x, 0, gun_z + muzzle_z_offset])
         secondary_parts.append(muzzle_brake)
         
+        # Track turret parts for separate 3D export
+        turret_parts = [gun_mount, gun_support, gun_cradle, gun_barrel, muzzle_brake]
+
         # Add treads (secondary color)
         if params.include_treads:
             tw = 0.4 * params.scale_factor  # Wider treads
             tread_len = L * 0.95
             # tread_h already calculated above
-            
+
             treadL = box(tread_len, tw, tread_h)
             treadR = box(tread_len, tw, tread_h)
-            
+
             track_y_offset = W/2 + tw/2 * 0.6
             track_z_offset = 0  # Tread center at ground level (hull is now raised)
-            
+
             treadL.apply_translation([0, track_y_offset, track_z_offset])
             treadR.apply_translation([0, -track_y_offset, track_z_offset])
             secondary_parts.extend([treadL, treadR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+
+        return ColoredVehicleParts(primary_parts, secondary_parts, turret_parts)
     
     def get_metadata(self, params: ArtilleryParameters) -> Dict[str, Any]:
         """Get artillery-specific metadata"""

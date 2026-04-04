@@ -215,6 +215,9 @@ class VehicleGeneratorGUI:
         
         self.generate_debug = tk.BooleanVar(value=True)
         ttk.Checkbutton(options_frame, text="Generate debug views", variable=self.generate_debug).pack(side=tk.LEFT)
+
+        self.export_3d = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options_frame, text="Export 3D meshes (GLB)", variable=self.export_3d).pack(side=tk.LEFT, padx=(10, 0))
         
         # Generation buttons
         button_frame = ttk.Frame(gen_frame)
@@ -482,8 +485,9 @@ class VehicleGeneratorGUI:
                     
                     self.status_var.set(f"Generating {spec.name} ({i+1}/{total})")
                     
-                    # Update spec with debug setting
+                    # Update spec with generation settings
                     spec.generate_debug = self.generate_debug.get()
+                    spec.export_3d = self.export_3d.get()
                     
                     # Generate vehicle
                     self.pipeline.generate_vehicle(spec, self.output_dir.get())
@@ -563,9 +567,11 @@ class VehicleGeneratorGUI:
                         "vehicle_type": spec.vehicle_type,
                         "seed": spec.seed,
                         "color": spec.color,
+                        "secondary_color": spec.secondary_color,
                         "n_dirs": spec.n_dirs,
                         "cell": spec.cell,
                         "generate_debug": spec.generate_debug,
+                        "export_3d": spec.export_3d,
                         "custom_params": spec.custom_params
                     })
                 
@@ -594,9 +600,11 @@ class VehicleGeneratorGUI:
                         vehicle_type=item["vehicle_type"],
                         seed=item["seed"],
                         color=tuple(item["color"]),
+                        secondary_color=tuple(item["secondary_color"]) if "secondary_color" in item else (160, 160, 160),
                         n_dirs=item.get("n_dirs", 8),
                         cell=item.get("cell", 512),
                         generate_debug=item.get("generate_debug", True),
+                        export_3d=item.get("export_3d", False),
                         custom_params=item.get("custom_params")
                     )
                     self.vehicle_specs.append(spec)

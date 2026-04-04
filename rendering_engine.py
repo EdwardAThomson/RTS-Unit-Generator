@@ -619,10 +619,74 @@ class VehicleExporter:
         self.renderer = renderer or VehicleRenderer()
         self.sprite_generator = sprite_generator or SpriteSheetGenerator()
     
+    def export_3d_mesh(self, colored_parts: 'ColoredVehicleParts', name: str,
+                       primary_color: tuple, secondary_color: tuple,
+                       out_root: str = "out/vehicles") -> dict:
+        """Export vehicle as GLB files with proper materials and colors.
+
+        Produces:
+          - <name>.glb          combined mesh (hull + turret)
+          - <name>_hull.glb     hull-only mesh
+          - <name>_turret.glb   turret-only mesh (if the vehicle has one)
+        """
+        mesh_dir = os.path.join(out_root, name, "meshes")
+        os.makedirs(mesh_dir, exist_ok=True)
+
+        def _apply_vertex_color(mesh_obj, color_rgb):
+            """Assign a solid vertex color (0-255 RGBA) to every vertex."""
+            r, g, b = color_rgb
+            n_verts = len(mesh_obj.vertices)
+            mesh_obj.visual = trimesh.visual.ColorVisuals(
+                mesh=mesh_obj,
+                vertex_colors=np.tile([r, g, b, 255], (n_verts, 1)).astype(np.uint8)
+            )
+            return mesh_obj
+
+        def _build_colored_scene(parts_primary, parts_secondary):
+            """Combine primary + secondary parts into a single scene with colors."""
+            scene = trimesh.Scene()
+            for i, part in enumerate(parts_primary):
+                colored = _apply_vertex_color(part.copy(), primary_color)
+                scene.add_geometry(colored, node_name=f"primary_{i}")
+            for i, part in enumerate(parts_secondary):
+                colored = _apply_vertex_color(part.copy(), secondary_color)
+                scene.add_geometry(colored, node_name=f"secondary_{i}")
+            return scene
+
+        result = {}
+
+        # --- Combined mesh (everything) ---
+        combined_scene = _build_colored_scene(
+            colored_parts.primary_parts, colored_parts.secondary_parts
+        )
+        combined_path = os.path.join(mesh_dir, f"{name}.glb")
+        combined_scene.export(combined_path)
+        result["combined_glb"] = combined_path
+        print(f"  3D mesh exported: {combined_path}")
+
+        # --- Hull mesh (body + treads/wheels, no turret) ---
+        hull_mesh = colored_parts.get_hull_mesh()
+        if hull_mesh is not None:
+            _apply_vertex_color(hull_mesh, primary_color)
+            hull_path = os.path.join(mesh_dir, f"{name}_hull.glb")
+            hull_mesh.export(hull_path)
+            result["hull_glb"] = hull_path
+
+        # --- Turret mesh (for independent rotation) ---
+        turret_mesh = colored_parts.get_turret_mesh()
+        if turret_mesh is not None:
+            _apply_vertex_color(turret_mesh, secondary_color)
+            turret_path = os.path.join(mesh_dir, f"{name}_turret.glb")
+            turret_mesh.export(turret_path)
+            result["turret_glb"] = turret_path
+
+        return result
+
     def export_vehicle(self, mesh: trimesh.Trimesh, name: str, vehicle_type: str,
                       color: Tuple[int, int, int], vehicle_metadata: Dict[str, Any],
                       out_root="out/vehicles", n_dirs=8, cell=512, generate_debug=True,
-                      secondary_color: Tuple[int, int, int] = None, colored_parts: ColoredVehicleParts = None):
+                      secondary_color: Tuple[int, int, int] = None, colored_parts: ColoredVehicleParts = None,
+                      export_3d: bool = False):
         """Export a complete vehicle with sprite sheet and metadata"""
         
         frames_dir = os.path.join(out_root, name, "frames")
@@ -677,13 +741,26 @@ class VehicleExporter:
             name, vehicle_type, n_dirs, cell, color, vehicle_metadata
         )
         
+        # Export 3D meshes if requested
+        mesh_result = {}
+        if export_3d and colored_parts is not None:
+            sec_color = secondary_color if secondary_color is not None else (160, 160, 160)
+            mesh_result = self.export_3d_mesh(
+                colored_parts, name,
+                primary_color=color,
+                secondary_color=sec_color,
+                out_root=out_root
+            )
+            metadata["meshes"] = mesh_result
+
         metadata_path = os.path.join(out_root, name, f"{name}.json")
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
-        
+
         return {
             "sprite_sheet": sheet_path,
             "metadata": metadata_path,
             "frames": frames,
-            "debug_dir": debug_dir if generate_debug else None
+            "debug_dir": debug_dir if generate_debug else None,
+            **mesh_result
         }

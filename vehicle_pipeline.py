@@ -28,7 +28,10 @@ class VehicleSpec:
     
     # Secondary color for details (turrets, barrels, etc.)
     secondary_color: Tuple[int, int, int] = (160, 160, 160)  # Light grey default
-    
+
+    # 3D mesh export (GLB)
+    export_3d: bool = False
+
     # Vehicle-specific parameters (optional)
     custom_params: Dict[str, Any] = None
     
@@ -90,7 +93,8 @@ class VehiclePipeline:
             cell=spec.cell,
             generate_debug=spec.generate_debug,
             secondary_color=spec.secondary_color,
-            colored_parts=colored_parts
+            colored_parts=colored_parts,
+            export_3d=spec.export_3d
         )
         
         print(f"✓ Generated {spec.name} -> {result['sprite_sheet']}")
