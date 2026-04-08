@@ -354,6 +354,7 @@ class VehicleGeneratorGUI:
                 n_dirs=original.n_dirs,
                 cell=original.cell,
                 generate_debug=original.generate_debug,
+                export_3d=original.export_3d,
                 animations=list(original.animations) if original.animations else None,
                 custom_params=original.custom_params.copy() if original.custom_params else None
             )

@@ -539,7 +539,13 @@ class VehicleFactory:
     def get_available_types(self) -> list:
         """Get list of available vehicle types"""
         return list(self._builders.keys())
-    
+
+    def get_builder(self, vehicle_type: str) -> VehicleBuilder:
+        """Get the builder for a vehicle type"""
+        if vehicle_type not in self._builders:
+            raise ValueError(f"Unknown vehicle type: {vehicle_type}")
+        return self._builders[vehicle_type]
+
     def create_vehicle(self, vehicle_type: str, params: VehicleParameters) -> trimesh.Trimesh:
         """Create a vehicle of the specified type"""
         if vehicle_type not in self._builders:

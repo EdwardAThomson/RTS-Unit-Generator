@@ -311,6 +311,7 @@ class VehicleRenderer:
 
         paths: List[str] = []
         total = n_dirs * animation_sequence.n_frames
+        renderer = pyrender.OffscreenRenderer(img_size, img_size)
 
         for dir_idx in range(n_dirs):
             az_rad = math.radians((360.0 / n_dirs) * dir_idx)
@@ -344,10 +345,10 @@ class VehicleRenderer:
                     if group_name and group_name in anim_transforms:
                         combined.apply_transform(anim_transforms[group_name])
                     combined.apply_transform(dir_rotation)
-                    mat = pyrender.MetallicRoughnessMaterial(
+                    material = pyrender.MetallicRoughnessMaterial(
                         baseColorFactor=rgba, metallicFactor=0.0, roughnessFactor=1.0
                     )
-                    scene.add(pyrender.Mesh.from_trimesh(combined, material=mat))
+                    scene.add(pyrender.Mesh.from_trimesh(combined, material=material))
 
                 # Primary hull parts (no animation)
                 _add_parts(colored_parts.primary_parts, primary_rgba)
@@ -385,9 +386,7 @@ class VehicleRenderer:
                 scene.add(camera, pose=camera_pose)
 
                 # Render
-                renderer = pyrender.OffscreenRenderer(img_size, img_size)
                 color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-                renderer.delete()
 
                 if dir_idx == 0 and frame_idx == 0:
                     non_bg = np.sum(np.any(color[:, :, :3] > [3, 3, 3], axis=2))
@@ -398,6 +397,7 @@ class VehicleRenderer:
                 Image.fromarray(color, "RGBA").save(fp)
                 paths.append(fp)
 
+        renderer.delete()
         return paths
 
     def _add_coordinate_axes(self, scene: pyrender.Scene, rotation_matrix: np.ndarray, axis_length: float = 8.0):

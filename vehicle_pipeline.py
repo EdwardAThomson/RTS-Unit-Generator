@@ -76,7 +76,7 @@ class VehiclePipeline:
         params = self.create_vehicle_parameters(spec)
         
         # Generate colored vehicle parts
-        builder = self.factory._builders[spec.vehicle_type]
+        builder = self.factory.get_builder(spec.vehicle_type)
         colored_parts = builder.build_colored(params)
         
         # Generate combined mesh for backward compatibility
