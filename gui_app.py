@@ -13,6 +13,7 @@ from PIL import Image, ImageTk
 
 from vehicle_pipeline import VehiclePipeline, VehicleSpec, PresetConfigurations
 from vehicle_definitions import VehicleFactory
+from rendering_engine import color_to_rgba
 
 
 class VehicleGeneratorGUI:
@@ -30,6 +31,10 @@ class VehicleGeneratorGUI:
         # GUI state
         self.vehicle_specs = []
         self.current_preview = None
+        self._preview_parts = None          # cached ColoredVehicleParts for on-demand rendering
+        self._preview_primary_rgba = None
+        self._preview_secondary_rgba = None
+        self._preview_render_id = 0         # monotonic counter to discard stale renders
         self.generation_thread = None
         
         # Setup GUI
@@ -194,15 +199,45 @@ class VehicleGeneratorGUI:
         """Create the preview panel"""
         preview_frame = ttk.LabelFrame(self.right_frame, text="Preview")
         preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        
+
         # Preview canvas
         self.preview_canvas = tk.Canvas(preview_frame, bg='white', width=400, height=400)
         self.preview_canvas.pack(expand=True, padx=10, pady=10)
-        
+
+        # Azimuth controls
+        az_frame = ttk.Frame(preview_frame)
+        az_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
+
+        ttk.Label(az_frame, text="Azimuth:", width=8).pack(side=tk.LEFT)
+        ttk.Button(az_frame, text="\u25C0", width=3, command=self.preview_rotate_left).pack(side=tk.LEFT)
+
+        self.azimuth_var = tk.DoubleVar(value=0.0)
+        ttk.Scale(
+            az_frame, from_=0, to=359, orient=tk.HORIZONTAL,
+            variable=self.azimuth_var, command=self._on_preview_angle_change,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        ttk.Button(az_frame, text="\u25B6", width=3, command=self.preview_rotate_right).pack(side=tk.LEFT)
+        self.azimuth_label = ttk.Label(az_frame, text="0\u00B0", width=5)
+        self.azimuth_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Elevation controls
+        el_frame = ttk.Frame(preview_frame)
+        el_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        ttk.Label(el_frame, text="Elevation:", width=8).pack(side=tk.LEFT)
+        self.elevation_var = tk.DoubleVar(value=35.264)
+        ttk.Scale(
+            el_frame, from_=0, to=90, orient=tk.HORIZONTAL,
+            variable=self.elevation_var, command=self._on_preview_angle_change,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.elevation_label = ttk.Label(el_frame, text="35\u00B0", width=5)
+        self.elevation_label.pack(side=tk.LEFT, padx=(5, 0))
+
         # Preview controls
         control_frame = ttk.Frame(preview_frame)
         control_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        
+
         ttk.Button(control_frame, text="Generate Preview", command=self.generate_preview).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(control_frame, text="Clear Preview", command=self.clear_preview).pack(side=tk.LEFT)
     
@@ -388,77 +423,116 @@ class VehicleGeneratorGUI:
         pass
     
     def generate_preview(self):
-        """Generate a preview of the selected vehicle"""
+        """Build the 3D model and render an initial preview.
+
+        The model parts are cached so the sliders can re-render at any angle
+        without running the full export pipeline.
+        """
         selection = self.vehicle_listbox.curselection()
         if not selection:
             messagebox.showwarning("No Selection", "Please select a vehicle to preview.")
             return
-        
+
         idx = selection[0]
         spec = self.vehicle_specs[idx]
-        
-        # Update spec with current editor values
         self.update_vehicle()
-        
-        # Generate preview in a separate thread
+
         def preview_thread():
             try:
-                self.status_var.set("Generating preview...")
-                
-                # Create a temporary spec for preview (single frame)
-                preview_spec = VehicleSpec(
-                    name="preview",
-                    vehicle_type=spec.vehicle_type,
-                    seed=spec.seed,
-                    color=spec.color,
-                    secondary_color=spec.secondary_color,  # Include secondary color!
-                    n_dirs=1,  # Just one direction for preview
-                    cell=256,  # Smaller for faster preview
-                    generate_debug=False
-                )
-                
-                # Generate the vehicle
-                result = self.pipeline.generate_vehicle(preview_spec, "temp/preview")
-                
-                # Load and display the preview
-                if result and 'frames' in result and result['frames']:
-                    self.display_preview_image(result['frames'][0])
-                
-                self.status_var.set("Preview generated")
-                
+                self.status_var.set("Building model...")
+
+                # Build 3D parts directly — skip the full pipeline
+                params = self.pipeline.create_vehicle_parameters(spec)
+                builder = self.factory.get_builder(spec.vehicle_type)
+                colored_parts = builder.build_colored(params)
+
+                self._preview_parts = colored_parts
+                self._preview_primary_rgba = color_to_rgba(spec.color)
+                self._preview_secondary_rgba = color_to_rgba(spec.secondary_color)
+
+                # Render at current slider angles
+                self._render_preview()
+                self.status_var.set("Preview ready — use sliders to rotate")
+
             except Exception as e:
                 messagebox.showerror("Preview Error", f"Failed to generate preview: {str(e)}")
                 self.status_var.set("Preview failed")
-        
+
         threading.Thread(target=preview_thread, daemon=True).start()
-    
-    def display_preview_image(self, image_path):
-        """Display an image in the preview canvas"""
-        try:
-            # Load and resize image
-            img = Image.open(image_path)
-            img.thumbnail((350, 350), Image.Resampling.LANCZOS)
-            
-            # Convert to PhotoImage
-            self.current_preview = ImageTk.PhotoImage(img)
-            
-            # Clear canvas and display image
-            self.preview_canvas.delete("all")
-            canvas_width = self.preview_canvas.winfo_width()
-            canvas_height = self.preview_canvas.winfo_height()
-            
-            if canvas_width > 1 and canvas_height > 1:  # Canvas is initialized
-                x = canvas_width // 2
-                y = canvas_height // 2
-                self.preview_canvas.create_image(x, y, image=self.current_preview)
-            
-        except Exception as e:
-            print(f"Error displaying preview: {e}")
-    
+
+    def _render_preview(self):
+        """Render the cached model at the current slider angles and display it."""
+        if self._preview_parts is None:
+            return
+
+        azimuth = self.azimuth_var.get()
+        elevation = self.elevation_var.get()
+        self._preview_render_id += 1
+        render_id = self._preview_render_id
+
+        def do_render():
+            renderer = self.pipeline.exporter.renderer
+            img = renderer.render_preview(
+                self._preview_parts,
+                self._preview_primary_rgba,
+                self._preview_secondary_rgba,
+                azimuth_deg=azimuth,
+                elevation_deg=elevation,
+                img_size=256,
+            )
+
+            if render_id != self._preview_render_id:
+                return  # a newer render was requested; discard this one
+
+            self.root.after(0, lambda: self._display_pil_image(img))
+
+        threading.Thread(target=do_render, daemon=True).start()
+
+    def _display_pil_image(self, img: Image.Image):
+        """Display a PIL Image on the preview canvas."""
+        img.thumbnail((350, 350), Image.Resampling.LANCZOS)
+        self.current_preview = ImageTk.PhotoImage(img)
+        self.preview_canvas.delete("all")
+        cw = self.preview_canvas.winfo_width()
+        ch = self.preview_canvas.winfo_height()
+        if cw > 1 and ch > 1:
+            self.preview_canvas.create_image(cw // 2, ch // 2, image=self.current_preview)
+
     def clear_preview(self):
-        """Clear the preview canvas"""
+        """Clear the preview canvas and cached model."""
         self.preview_canvas.delete("all")
         self.current_preview = None
+        self._preview_parts = None
+        self._preview_primary_rgba = None
+        self._preview_secondary_rgba = None
+        self.azimuth_var.set(0)
+        self.elevation_var.set(35.264)
+        self.azimuth_label.configure(text="0\u00B0")
+        self.elevation_label.configure(text="35\u00B0")
+
+    # ---- Preview rotation controls ----
+
+    def _on_preview_angle_change(self, _value=None):
+        """Called when either slider moves — update labels and re-render."""
+        az = self.azimuth_var.get()
+        el = self.elevation_var.get()
+        self.azimuth_label.configure(text=f"{int(az)}\u00B0")
+        self.elevation_label.configure(text=f"{int(el)}\u00B0")
+        self._render_preview()
+
+    def preview_rotate_left(self):
+        """Step azimuth 22.5 degrees counter-clockwise."""
+        if self._preview_parts is None:
+            return
+        self.azimuth_var.set((self.azimuth_var.get() - 22.5) % 360)
+        self._on_preview_angle_change()
+
+    def preview_rotate_right(self):
+        """Step azimuth 22.5 degrees clockwise."""
+        if self._preview_parts is None:
+            return
+        self.azimuth_var.set((self.azimuth_var.get() + 22.5) % 360)
+        self._on_preview_angle_change()
     
     def browse_output_dir(self):
         """Browse for output directory"""
