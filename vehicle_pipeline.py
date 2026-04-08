@@ -5,13 +5,14 @@ This module orchestrates vehicle creation and rendering using the modular compon
 
 import os
 from dataclasses import dataclass
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 
 from vehicle_definitions import (
-    VehicleFactory, VehicleParameters, 
+    VehicleFactory, VehicleParameters,
     TankParameters, APCParameters, ArtilleryParameters
 )
 from rendering_engine import VehicleRenderer, VehicleExporter, RenderConfig
+from animation_definitions import get_default_animations, AnimationSet
 
 
 # ---------- Pipeline configuration ----------
@@ -28,7 +29,13 @@ class VehicleSpec:
     
     # Secondary color for details (turrets, barrels, etc.)
     secondary_color: Tuple[int, int, int] = (160, 160, 160)  # Light grey default
-    
+
+    # 3D mesh export (GLB)
+    export_3d: bool = False
+
+    # Animation sequences to render (e.g. ["idle", "firing", "moving"] or None for static)
+    animations: Optional[List[str]] = None
+
     # Vehicle-specific parameters (optional)
     custom_params: Dict[str, Any] = None
     
@@ -69,7 +76,7 @@ class VehiclePipeline:
         params = self.create_vehicle_parameters(spec)
         
         # Generate colored vehicle parts
-        builder = self.factory._builders[spec.vehicle_type]
+        builder = self.factory.get_builder(spec.vehicle_type)
         colored_parts = builder.build_colored(params)
         
         # Generate combined mesh for backward compatibility
@@ -78,6 +85,16 @@ class VehiclePipeline:
         # Get vehicle metadata
         vehicle_metadata = self.factory.get_vehicle_metadata(spec.vehicle_type, params)
         
+        # Build animation set if requested
+        anim_set = None
+        if spec.animations:
+            all_anims = get_default_animations(spec.vehicle_type, params.scale_factor)
+            # Filter to only the requested sequences
+            anim_set = AnimationSet(sequences={
+                name: seq for name, seq in all_anims.sequences.items()
+                if name in spec.animations
+            })
+
         # Export vehicle with two-color system
         result = self.exporter.export_vehicle(
             mesh=mesh,
@@ -90,7 +107,9 @@ class VehiclePipeline:
             cell=spec.cell,
             generate_debug=spec.generate_debug,
             secondary_color=spec.secondary_color,
-            colored_parts=colored_parts
+            colored_parts=colored_parts,
+            export_3d=spec.export_3d,
+            animation_set=anim_set,
         )
         
         print(f"✓ Generated {spec.name} -> {result['sprite_sheet']}")

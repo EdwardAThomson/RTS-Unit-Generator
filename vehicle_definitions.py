@@ -45,14 +45,61 @@ def chamfered_hull(L=3.0, W=2.0, H=0.8, nose=0.8):
 # ---------- Multi-color vehicle support ----------
 @dataclass
 class ColoredVehicleParts:
-    """Container for vehicle parts with different colors"""
-    primary_parts: List[trimesh.Trimesh]  # Main hull parts (user-selected color)
-    secondary_parts: List[trimesh.Trimesh]  # Detail parts (grey)
-    
+    """Container for vehicle parts with different colors.
+
+    For 3D export the parts are split into groups that a game engine can
+    animate independently:
+      - primary_parts   : hull body (user-selected colour)
+      - secondary_parts : ALL detail parts (grey) – used for 2D rendering
+      - turret_parts    : turret base (subset of secondary, rotates to aim)
+      - barrel_parts    : gun barrel + muzzle brake (recoils on firing)
+      - mobility_parts  : wheels or treads (spin / scroll with movement)
+    """
+    primary_parts: List[trimesh.Trimesh]
+    secondary_parts: List[trimesh.Trimesh]
+    turret_parts: List[trimesh.Trimesh] = None
+    barrel_parts: List[trimesh.Trimesh] = None
+    mobility_parts: List[trimesh.Trimesh] = None
+
+    def __post_init__(self):
+        if self.turret_parts is None:
+            self.turret_parts = []
+        if self.barrel_parts is None:
+            self.barrel_parts = []
+        if self.mobility_parts is None:
+            self.mobility_parts = []
+
+    # ---- combined helpers (used by 2D rendering) ----
     def get_combined_mesh(self) -> trimesh.Trimesh:
-        """Combine all parts into a single mesh"""
         all_parts = self.primary_parts + self.secondary_parts
         return trimesh.util.concatenate(all_parts)
+
+    # ---- per-group helpers (used by 3D export) ----
+    def _exclude(self, *groups):
+        excluded = set()
+        for g in groups:
+            excluded.update(id(p) for p in g)
+        return excluded
+
+    def get_hull_mesh(self) -> trimesh.Trimesh:
+        """Body + any secondary parts that aren't turret/barrel/mobility."""
+        excluded = self._exclude(self.turret_parts, self.barrel_parts, self.mobility_parts)
+        hull = self.primary_parts + [p for p in self.secondary_parts if id(p) not in excluded]
+        return trimesh.util.concatenate(hull) if hull else None
+
+    def get_turret_mesh(self) -> trimesh.Trimesh:
+        return trimesh.util.concatenate(self.turret_parts) if self.turret_parts else None
+
+    def get_barrel_mesh(self) -> trimesh.Trimesh:
+        return trimesh.util.concatenate(self.barrel_parts) if self.barrel_parts else None
+
+    def get_mobility_mesh(self) -> trimesh.Trimesh:
+        return trimesh.util.concatenate(self.mobility_parts) if self.mobility_parts else None
+
+    def get_secondary_hull_parts(self) -> List[trimesh.Trimesh]:
+        """Secondary parts that are NOT in any animated group."""
+        excluded = self._exclude(self.turret_parts, self.barrel_parts, self.mobility_parts)
+        return [p for p in self.secondary_parts if id(p) not in excluded]
 
 
 # ---------- Vehicle base class ----------
@@ -150,32 +197,56 @@ class TankBuilder(VehicleBuilder):
         barrel.apply_translation([barrel_start_x + bl/2, 0, turret_center_z])
         secondary_parts.append(barrel)
         
-        # Add treads if requested (secondary color)
+        # Part groups for 3D export
+        turret_group = [turret]
+        barrel_group = [barrel]
+        mobility_group = []
+
         if params.include_treads:
             tw = 0.3 * params.scale_factor
             tread_len = L * 0.9
-            # tread_h already calculated above
-            
+
             treadL = box(tread_len, tw, tread_h)
             treadR = box(tread_len, tw, tread_h)
-            
+
             track_y_offset = W/2 + tw/2 * 0.7
-            track_z_offset = 0  # Tread center at ground level (hull is now raised)
-            
+            track_z_offset = 0
+
             treadL.apply_translation([0, track_y_offset, track_z_offset])
             treadR.apply_translation([0, -track_y_offset, track_z_offset])
             secondary_parts.extend([treadL, treadR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+            mobility_group.extend([treadL, treadR])
+
+        return ColoredVehicleParts(
+            primary_parts, secondary_parts,
+            turret_parts=turret_group,
+            barrel_parts=barrel_group,
+            mobility_parts=mobility_group,
+        )
     
     def get_metadata(self, params: TankParameters) -> Dict[str, Any]:
-        """Get tank-specific metadata"""
+        """Get tank-specific metadata including 3D attachment points"""
+        rnd = random.Random(params.seed)
+        sf = params.scale_factor
+        H = rnd.uniform(*params.hull_height_range) * sf
+        tread_h = 0.4 * sf if params.include_treads else 0
+        tr = rnd.uniform(*params.turret_radius_range) * sf
+        th = rnd.uniform(*params.turret_height_range) * sf
+
+        turret_mount_z = H / 2 + tread_h / 2          # top of hull
+        barrel_mount_z = H / 2 + th / 2 + tread_h / 2 # centre of turret
+        barrel_mount_x = tr * 0.8                      # front edge of turret
+
         return {
-            "pivot": [0.5, 0.75],  # Where the vehicle "touches" the ground
-            "muzzle": [0.6, 0.5],  # Normalized muzzle position
+            "pivot": [0.5, 0.75],
+            "muzzle": [0.6, 0.5],
             "type": "tank",
             "has_turret": True,
-            "can_rotate_turret": True
+            "can_rotate_turret": True,
+            "attachments": {
+                "turret_mount": [0.0, 0.0, turret_mount_z],
+                "barrel_mount": [barrel_mount_x, 0.0, barrel_mount_z],
+            },
         }
 
 
@@ -235,36 +306,60 @@ class APCBuilder(VehicleBuilder):
         weapon.apply_translation([L*0.2 + tr*0.8 + bl/2, 0, H/2 + th/2 + wr])  # Also raised
         secondary_parts.append(weapon)
         
+        # Part groups for 3D export
+        turret_group = [turret]
+        barrel_group = [weapon]
+        mobility_group = []
+
         # Add wheels if requested (secondary color)
         if params.include_wheels:
             wheel_spacing = L / (params.num_wheels_per_side + 1)
-            
+
             for i in range(params.num_wheels_per_side):
                 x_pos = -L/2 + wheel_spacing * (i + 1)
-                # Position wheels so bottom touches ground (now that hull is raised)
-                z_pos = 0  # Wheel center at ground level (hull is now raised by wr)
-                
-                # Left side wheels
+                z_pos = 0
+
                 wheelL = cylinder(wr, 0.2 * params.scale_factor, axis='y')
                 wheelL.apply_translation([x_pos, W/2 + 0.1 * params.scale_factor, z_pos])
-                
-                # Right side wheels
+
                 wheelR = cylinder(wr, 0.2 * params.scale_factor, axis='y')
                 wheelR.apply_translation([x_pos, -W/2 - 0.1 * params.scale_factor, z_pos])
-                
+
                 secondary_parts.extend([wheelL, wheelR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+                mobility_group.extend([wheelL, wheelR])
+
+        return ColoredVehicleParts(
+            primary_parts, secondary_parts,
+            turret_parts=turret_group,
+            barrel_parts=barrel_group,
+            mobility_parts=mobility_group,
+        )
     
     def get_metadata(self, params: APCParameters) -> Dict[str, Any]:
-        """Get APC-specific metadata"""
+        """Get APC-specific metadata including 3D attachment points"""
+        rnd = random.Random(params.seed)
+        sf = params.scale_factor
+        L = rnd.uniform(*params.hull_length_range) * sf
+        H = rnd.uniform(*params.hull_height_range) * sf
+        wr = rnd.uniform(*params.wheel_radius_range) * sf if params.include_wheels else 0
+        tr = 0.25 * sf
+        th = 0.15 * sf
+
+        turret_mount_z = H / 2 + wr
+        barrel_mount_x = L * 0.2 + tr * 0.8
+        barrel_mount_z = H / 2 + th / 2 + wr
+
         return {
             "pivot": [0.5, 0.7],
             "muzzle": [0.65, 0.5],
             "type": "apc",
             "has_turret": True,
-            "can_rotate_turret": False,  # Fixed weapon mount
-            "transport_capacity": 8
+            "can_rotate_turret": False,
+            "transport_capacity": 8,
+            "attachments": {
+                "turret_mount": [L * 0.2, 0.0, turret_mount_z],
+                "barrel_mount": [barrel_mount_x, 0.0, barrel_mount_z],
+            },
         }
 
 
@@ -368,34 +463,61 @@ class ArtilleryBuilder(VehicleBuilder):
         muzzle_brake.apply_translation([muzzle_x, 0, gun_z + muzzle_z_offset])
         secondary_parts.append(muzzle_brake)
         
+        # Part groups for 3D export
+        turret_group = [gun_mount, gun_support, gun_cradle]
+        barrel_group = [gun_barrel, muzzle_brake]
+        mobility_group = []
+
         # Add treads (secondary color)
         if params.include_treads:
-            tw = 0.4 * params.scale_factor  # Wider treads
+            tw = 0.4 * params.scale_factor
             tread_len = L * 0.95
-            # tread_h already calculated above
-            
+
             treadL = box(tread_len, tw, tread_h)
             treadR = box(tread_len, tw, tread_h)
-            
+
             track_y_offset = W/2 + tw/2 * 0.6
-            track_z_offset = 0  # Tread center at ground level (hull is now raised)
-            
+            track_z_offset = 0
+
             treadL.apply_translation([0, track_y_offset, track_z_offset])
             treadR.apply_translation([0, -track_y_offset, track_z_offset])
             secondary_parts.extend([treadL, treadR])
-        
-        return ColoredVehicleParts(primary_parts, secondary_parts)
+            mobility_group.extend([treadL, treadR])
+
+        return ColoredVehicleParts(
+            primary_parts, secondary_parts,
+            turret_parts=turret_group,
+            barrel_parts=barrel_group,
+            mobility_parts=mobility_group,
+        )
     
     def get_metadata(self, params: ArtilleryParameters) -> Dict[str, Any]:
-        """Get artillery-specific metadata"""
+        """Get artillery-specific metadata including 3D attachment points"""
+        rnd = random.Random(params.seed)
+        sf = params.scale_factor
+        H = rnd.uniform(*params.hull_height_range) * sf
+        tread_h = 0.5 * sf if params.include_treads else 0
+        mount_r = 0.5 * sf
+        mount_h = 0.4 * sf
+        support_h = 0.2 * sf
+        support_l = 0.8 * sf
+
+        turret_mount_z = H / 2 + tread_h / 2
+        barrel_mount_x = mount_r * 0.8 + support_l / 2
+        barrel_mount_z = H / 2 + mount_h + support_h / 2 + tread_h / 2
+
         return {
             "pivot": [0.5, 0.75],
-            "muzzle": [0.8, 0.55],  # Further forward due to long barrel
+            "muzzle": [0.8, 0.55],
             "type": "artillery",
             "has_turret": True,
             "can_rotate_turret": True,
             "range": "long",
-            "damage": "high"
+            "damage": "high",
+            "attachments": {
+                "turret_mount": [0.0, 0.0, turret_mount_z],
+                "barrel_mount": [barrel_mount_x, 0.0, barrel_mount_z],
+            },
         }
 
 
@@ -417,7 +539,13 @@ class VehicleFactory:
     def get_available_types(self) -> list:
         """Get list of available vehicle types"""
         return list(self._builders.keys())
-    
+
+    def get_builder(self, vehicle_type: str) -> VehicleBuilder:
+        """Get the builder for a vehicle type"""
+        if vehicle_type not in self._builders:
+            raise ValueError(f"Unknown vehicle type: {vehicle_type}")
+        return self._builders[vehicle_type]
+
     def create_vehicle(self, vehicle_type: str, params: VehicleParameters) -> trimesh.Trimesh:
         """Create a vehicle of the specified type"""
         if vehicle_type not in self._builders:
