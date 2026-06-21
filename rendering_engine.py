@@ -421,6 +421,16 @@ class VehicleRenderer:
         secondary_mesh = (trimesh.util.concatenate(colored_parts.secondary_parts)
                           if colored_parts.secondary_parts else None)
 
+        # Centre the model on the world origin so it rotates about its own
+        # centre (rather than orbiting the origin) and stays fixed in the frame.
+        present = [m for m in (primary_mesh, secondary_mesh) if m is not None]
+        if present:
+            bounds = trimesh.util.concatenate(present).bounds
+            model_center = (bounds[0] + bounds[1]) / 2.0
+        else:
+            model_center = np.zeros(3)
+        center_transform = trimesh.transformations.translation_matrix(-model_center)
+
         primary_mat = pyrender.MetallicRoughnessMaterial(
             baseColorFactor=primary_rgba, metallicFactor=0.0, roughnessFactor=1.0)
         secondary_mat = pyrender.MetallicRoughnessMaterial(
@@ -432,8 +442,9 @@ class VehicleRenderer:
         count = 0
 
         for az_idx, az_deg in enumerate(azimuths):
-            rotation = trimesh.transformations.rotation_matrix(
-                math.radians(az_deg), [0, 0, 1])
+            # Translate to centre first, then spin about the vertical axis.
+            rotation = (trimesh.transformations.rotation_matrix(
+                math.radians(az_deg), [0, 0, 1]) @ center_transform)
 
             for el_idx, el_deg in enumerate(elevations):
                 scene = pyrender.Scene(bg_color=self.config.background_color)
@@ -458,15 +469,17 @@ class VehicleRenderer:
                 ])
                 scene.add(light, pose=light_pose)
 
-                # Camera
+                # Camera orbits the origin at a fixed distance and always looks
+                # at it, so the centred model stays centred at every elevation.
                 camera = pyrender.OrthographicCamera(
                     xmag=self.config.ortho_mag, ymag=self.config.ortho_mag,
                     znear=self.config.znear, zfar=self.config.zfar)
                 elev_rad = math.radians(el_deg)
+                d = self.config.camera_distance
                 camera_pose = np.array([
                     [1, 0, 0, 0],
-                    [0, math.cos(elev_rad), -math.sin(elev_rad), self.config.camera_y_offset],
-                    [0, math.sin(elev_rad), math.cos(elev_rad), self.config.camera_distance],
+                    [0, math.cos(elev_rad), -math.sin(elev_rad), -d * math.sin(elev_rad)],
+                    [0, math.sin(elev_rad), math.cos(elev_rad),  d * math.cos(elev_rad)],
                     [0, 0, 0, 1]
                 ])
                 scene.add(camera, pose=camera_pose)
