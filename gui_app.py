@@ -31,10 +31,9 @@ class VehicleGeneratorGUI:
         # GUI state
         self.vehicle_specs = []
         self.current_preview = None
-        self._preview_parts = None          # cached ColoredVehicleParts for on-demand rendering
-        self._preview_primary_rgba = None
-        self._preview_secondary_rgba = None
-        self._preview_render_id = 0         # monotonic counter to discard stale renders
+        self._preview_grid = None       # 2D list of pre-rendered PIL Images [az][el]
+        self._preview_azimuths = []     # list of azimuth angles in the grid
+        self._preview_elevations = []   # list of elevation angles in the grid
         self.generation_thread = None
         
         # Setup GUI
@@ -200,39 +199,25 @@ class VehicleGeneratorGUI:
         preview_frame = ttk.LabelFrame(self.right_frame, text="Preview")
         preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
 
-        # Preview canvas
+        # Preview canvas — click-and-drag to rotate the 3D model
         self.preview_canvas = tk.Canvas(preview_frame, bg='white', width=400, height=400)
         self.preview_canvas.pack(expand=True, padx=10, pady=10)
 
-        # Azimuth controls
-        az_frame = ttk.Frame(preview_frame)
-        az_frame.pack(fill=tk.X, padx=10, pady=(0, 2))
+        self.preview_canvas.bind('<ButtonPress-1>', self._on_preview_mouse_down)
+        self.preview_canvas.bind('<B1-Motion>', self._on_preview_mouse_drag)
 
-        ttk.Label(az_frame, text="Azimuth:", width=8).pack(side=tk.LEFT)
-        ttk.Button(az_frame, text="\u25C0", width=3, command=self.preview_rotate_left).pack(side=tk.LEFT)
-
+        # Camera angle state
         self.azimuth_var = tk.DoubleVar(value=0.0)
-        ttk.Scale(
-            az_frame, from_=0, to=359, orient=tk.HORIZONTAL,
-            variable=self.azimuth_var, command=self._on_preview_angle_change,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        ttk.Button(az_frame, text="\u25B6", width=3, command=self.preview_rotate_right).pack(side=tk.LEFT)
-        self.azimuth_label = ttk.Label(az_frame, text="0\u00B0", width=5)
-        self.azimuth_label.pack(side=tk.LEFT, padx=(5, 0))
-
-        # Elevation controls
-        el_frame = ttk.Frame(preview_frame)
-        el_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
-
-        ttk.Label(el_frame, text="Elevation:", width=8).pack(side=tk.LEFT)
         self.elevation_var = tk.DoubleVar(value=35.264)
-        ttk.Scale(
-            el_frame, from_=0, to=90, orient=tk.HORIZONTAL,
-            variable=self.elevation_var, command=self._on_preview_angle_change,
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.elevation_label = ttk.Label(el_frame, text="35\u00B0", width=5)
-        self.elevation_label.pack(side=tk.LEFT, padx=(5, 0))
+        self._drag_start = None  # (x, y, start_az, start_el)
+
+        # Info bar: angle readout + hint
+        info_frame = ttk.Frame(preview_frame)
+        info_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        self.angle_label = ttk.Label(info_frame, text="Az 0\u00B0  El 35\u00B0")
+        self.angle_label.pack(side=tk.LEFT)
+        ttk.Label(info_frame, text="Drag to rotate", foreground="grey").pack(side=tk.RIGHT)
 
         # Preview controls
         control_frame = ttk.Frame(preview_frame)
@@ -440,99 +425,104 @@ class VehicleGeneratorGUI:
         def preview_thread():
             try:
                 self.status_var.set("Building model...")
-
-                # Build 3D parts directly — skip the full pipeline
                 params = self.pipeline.create_vehicle_parameters(spec)
                 builder = self.factory.get_builder(spec.vehicle_type)
                 colored_parts = builder.build_colored(params)
 
-                self._preview_parts = colored_parts
-                self._preview_primary_rgba = color_to_rgba(spec.color)
-                self._preview_secondary_rgba = color_to_rgba(spec.secondary_color)
+                primary_rgba = color_to_rgba(spec.color)
+                secondary_rgba = color_to_rgba(spec.secondary_color)
 
-                # Render at current slider angles
-                self._render_preview()
-                self.status_var.set("Preview ready — use sliders to rotate")
+                def on_progress(done, total):
+                    self.status_var.set(f"Rendering preview... {done}/{total}")
+                    self.progress_var.set(done / total * 100)
+
+                grid, azimuths, elevations = (
+                    self.pipeline.exporter.renderer.render_preview_grid(
+                        colored_parts, primary_rgba, secondary_rgba,
+                        n_azimuth=24, n_elevation=13, img_size=256,
+                        progress_callback=on_progress,
+                    )
+                )
+
+                self._preview_grid = grid
+                self._preview_azimuths = azimuths
+                self._preview_elevations = elevations
+
+                # Show the default isometric view
+                self.azimuth_var.set(0.0)
+                self.elevation_var.set(35.264)
+                self.root.after(0, self._show_nearest_frame)
+                self.status_var.set("Preview ready — drag to rotate")
+                self.progress_var.set(0)
 
             except Exception as e:
                 messagebox.showerror("Preview Error", f"Failed to generate preview: {str(e)}")
                 self.status_var.set("Preview failed")
+                self.progress_var.set(0)
 
         threading.Thread(target=preview_thread, daemon=True).start()
 
-    def _render_preview(self):
-        """Render the cached model at the current slider angles and display it."""
-        if self._preview_parts is None:
+    def _show_nearest_frame(self):
+        """Look up the nearest pre-rendered frame and display it instantly."""
+        if not self._preview_grid:
             return
 
-        azimuth = self.azimuth_var.get()
-        elevation = self.elevation_var.get()
-        self._preview_render_id += 1
-        render_id = self._preview_render_id
+        az = self.azimuth_var.get()
+        el = self.elevation_var.get()
 
-        def do_render():
-            renderer = self.pipeline.exporter.renderer
-            img = renderer.render_preview(
-                self._preview_parts,
-                self._preview_primary_rgba,
-                self._preview_secondary_rgba,
-                azimuth_deg=azimuth,
-                elevation_deg=elevation,
-                img_size=256,
-            )
+        # Snap to nearest grid cell
+        n_az = len(self._preview_azimuths)
+        n_el = len(self._preview_elevations)
+        az_step = 360.0 / n_az
+        el_step = 180.0 / max(n_el - 1, 1)
 
-            if render_id != self._preview_render_id:
-                return  # a newer render was requested; discard this one
+        az_idx = round(az / az_step) % n_az
+        el_idx = max(0, min(n_el - 1, round((el + 90.0) / el_step)))
 
-            self.root.after(0, lambda: self._display_pil_image(img))
-
-        threading.Thread(target=do_render, daemon=True).start()
-
-    def _display_pil_image(self, img: Image.Image):
-        """Display a PIL Image on the preview canvas."""
-        img.thumbnail((350, 350), Image.Resampling.LANCZOS)
-        self.current_preview = ImageTk.PhotoImage(img)
+        img = self._preview_grid[az_idx][el_idx]
+        display = img.copy()
+        display.thumbnail((350, 350), Image.Resampling.LANCZOS)
+        self.current_preview = ImageTk.PhotoImage(display)
         self.preview_canvas.delete("all")
         cw = self.preview_canvas.winfo_width()
         ch = self.preview_canvas.winfo_height()
         if cw > 1 and ch > 1:
             self.preview_canvas.create_image(cw // 2, ch // 2, image=self.current_preview)
 
+        self.angle_label.configure(text=f"Az {int(az)}\u00B0  El {int(el)}\u00B0")
+
     def clear_preview(self):
-        """Clear the preview canvas and cached model."""
+        """Clear the preview canvas and cached frames."""
         self.preview_canvas.delete("all")
         self.current_preview = None
-        self._preview_parts = None
-        self._preview_primary_rgba = None
-        self._preview_secondary_rgba = None
+        self._preview_grid = None
+        self._preview_azimuths = []
+        self._preview_elevations = []
         self.azimuth_var.set(0)
         self.elevation_var.set(35.264)
-        self.azimuth_label.configure(text="0\u00B0")
-        self.elevation_label.configure(text="35\u00B0")
+        self.angle_label.configure(text="Az 0\u00B0  El 35\u00B0")
 
-    # ---- Preview rotation controls ----
+    # ---- Mouse-drag rotation ----
 
-    def _on_preview_angle_change(self, _value=None):
-        """Called when either slider moves — update labels and re-render."""
-        az = self.azimuth_var.get()
-        el = self.elevation_var.get()
-        self.azimuth_label.configure(text=f"{int(az)}\u00B0")
-        self.elevation_label.configure(text=f"{int(el)}\u00B0")
-        self._render_preview()
+    def _on_preview_mouse_down(self, event):
+        """Record drag start position and current angles."""
+        self._drag_start = (event.x, event.y,
+                            self.azimuth_var.get(), self.elevation_var.get())
 
-    def preview_rotate_left(self):
-        """Step azimuth 22.5 degrees counter-clockwise."""
-        if self._preview_parts is None:
+    def _on_preview_mouse_drag(self, event):
+        """Update angles from mouse delta and snap to nearest pre-rendered frame."""
+        if self._drag_start is None or not self._preview_grid:
             return
-        self.azimuth_var.set((self.azimuth_var.get() - 22.5) % 360)
-        self._on_preview_angle_change()
+        x0, y0, az0, el0 = self._drag_start
+        dx = event.x - x0
+        dy = event.y - y0
 
-    def preview_rotate_right(self):
-        """Step azimuth 22.5 degrees clockwise."""
-        if self._preview_parts is None:
-            return
-        self.azimuth_var.set((self.azimuth_var.get() + 22.5) % 360)
-        self._on_preview_angle_change()
+        new_az = (az0 + dx * 0.5) % 360
+        new_el = max(-90.0, min(90.0, el0 - dy * 0.5))
+
+        self.azimuth_var.set(new_az)
+        self.elevation_var.set(new_el)
+        self._show_nearest_frame()
     
     def browse_output_dir(self):
         """Browse for output directory"""

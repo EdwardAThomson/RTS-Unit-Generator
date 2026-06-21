@@ -400,71 +400,99 @@ class VehicleRenderer:
         renderer.delete()
         return paths
 
-    def render_preview(self, colored_parts: ColoredVehicleParts,
-                       primary_rgba: Tuple[float, float, float, float],
-                       secondary_rgba: Tuple[float, float, float, float],
-                       azimuth_deg: float = 0.0,
-                       elevation_deg: float = 35.264,
-                       img_size: int = 256) -> 'Image.Image':
-        """Render a single frame at arbitrary azimuth/elevation, returning a PIL Image.
+    def render_preview_grid(self, colored_parts: ColoredVehicleParts,
+                            primary_rgba: Tuple[float, float, float, float],
+                            secondary_rgba: Tuple[float, float, float, float],
+                            n_azimuth: int = 24, n_elevation: int = 7,
+                            img_size: int = 256,
+                            progress_callback=None) -> Tuple[List[List['Image.Image']],
+                                                              List[float], List[float]]:
+        """Pre-render a grid of azimuth x elevation angles for interactive preview.
 
-        This avoids the full export pipeline — no files, no sprite sheets — making
-        it ideal for interactive preview controls.
+        Returns (grid, azimuths, elevations) where grid[az_idx][el_idx] is a
+        PIL Image.  One GL context is created and reused for the entire batch.
         """
-        az_rad = math.radians(azimuth_deg)
-        rotation_matrix = trimesh.transformations.rotation_matrix(az_rad, [0, 0, 1])
+        azimuths = [i * 360.0 / n_azimuth for i in range(n_azimuth)]
+        elevations = [-90.0 + i * 180.0 / max(n_elevation - 1, 1) for i in range(n_elevation)]
 
-        scene = pyrender.Scene(bg_color=self.config.background_color)
+        # Pre-concatenate meshes once
+        primary_mesh = (trimesh.util.concatenate(colored_parts.primary_parts)
+                        if colored_parts.primary_parts else None)
+        secondary_mesh = (trimesh.util.concatenate(colored_parts.secondary_parts)
+                          if colored_parts.secondary_parts else None)
 
-        # Primary parts
-        if colored_parts.primary_parts:
-            combined = trimesh.util.concatenate(colored_parts.primary_parts)
-            rotated = combined.copy()
-            rotated.apply_transform(rotation_matrix)
-            material = pyrender.MetallicRoughnessMaterial(
-                baseColorFactor=primary_rgba, metallicFactor=0.0, roughnessFactor=1.0
-            )
-            scene.add(pyrender.Mesh.from_trimesh(rotated, material=material))
+        # Centre the model on the world origin so it rotates about its own
+        # centre (rather than orbiting the origin) and stays fixed in the frame.
+        present = [m for m in (primary_mesh, secondary_mesh) if m is not None]
+        if present:
+            bounds = trimesh.util.concatenate(present).bounds
+            model_center = (bounds[0] + bounds[1]) / 2.0
+        else:
+            model_center = np.zeros(3)
+        center_transform = trimesh.transformations.translation_matrix(-model_center)
 
-        # Secondary parts
-        if colored_parts.secondary_parts:
-            combined = trimesh.util.concatenate(colored_parts.secondary_parts)
-            rotated = combined.copy()
-            rotated.apply_transform(rotation_matrix)
-            material = pyrender.MetallicRoughnessMaterial(
-                baseColorFactor=secondary_rgba, metallicFactor=0.0, roughnessFactor=1.0
-            )
-            scene.add(pyrender.Mesh.from_trimesh(rotated, material=material))
-
-        # Lighting
-        light = pyrender.DirectionalLight(intensity=self.config.light_intensity)
-        light_pose = np.array([
-            [1, 0, 0, self.config.light_position[0]],
-            [0, 1, 0, self.config.light_position[1]],
-            [0, 0, 1, self.config.light_position[2]],
-            [0, 0, 0, 1]
-        ])
-        scene.add(light, pose=light_pose)
-
-        # Camera with parameterised elevation
-        camera = pyrender.OrthographicCamera(
-            xmag=self.config.ortho_mag, ymag=self.config.ortho_mag,
-            znear=self.config.znear, zfar=self.config.zfar
-        )
-        elev_rad = math.radians(elevation_deg)
-        camera_pose = np.array([
-            [1, 0, 0, 0],
-            [0, math.cos(elev_rad), -math.sin(elev_rad), self.config.camera_y_offset],
-            [0, math.sin(elev_rad), math.cos(elev_rad), self.config.camera_distance],
-            [0, 0, 0, 1]
-        ])
-        scene.add(camera, pose=camera_pose)
+        primary_mat = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=primary_rgba, metallicFactor=0.0, roughnessFactor=1.0)
+        secondary_mat = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=secondary_rgba, metallicFactor=0.0, roughnessFactor=1.0)
 
         renderer = pyrender.OffscreenRenderer(img_size, img_size)
-        color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-        renderer.delete()
+        grid = [[None] * n_elevation for _ in range(n_azimuth)]
+        total = n_azimuth * n_elevation
+        count = 0
 
-        return Image.fromarray(color, "RGBA")
+        for az_idx, az_deg in enumerate(azimuths):
+            # Translate to centre first, then spin about the vertical axis.
+            rotation = (trimesh.transformations.rotation_matrix(
+                math.radians(az_deg), [0, 0, 1]) @ center_transform)
+
+            for el_idx, el_deg in enumerate(elevations):
+                scene = pyrender.Scene(bg_color=self.config.background_color)
+
+                if primary_mesh is not None:
+                    rotated = primary_mesh.copy()
+                    rotated.apply_transform(rotation)
+                    scene.add(pyrender.Mesh.from_trimesh(rotated, material=primary_mat))
+
+                if secondary_mesh is not None:
+                    rotated = secondary_mesh.copy()
+                    rotated.apply_transform(rotation)
+                    scene.add(pyrender.Mesh.from_trimesh(rotated, material=secondary_mat))
+
+                # Lighting
+                light = pyrender.DirectionalLight(intensity=self.config.light_intensity)
+                light_pose = np.array([
+                    [1, 0, 0, self.config.light_position[0]],
+                    [0, 1, 0, self.config.light_position[1]],
+                    [0, 0, 1, self.config.light_position[2]],
+                    [0, 0, 0, 1]
+                ])
+                scene.add(light, pose=light_pose)
+
+                # Camera orbits the origin at a fixed distance and always looks
+                # at it, so the centred model stays centred at every elevation.
+                camera = pyrender.OrthographicCamera(
+                    xmag=self.config.ortho_mag, ymag=self.config.ortho_mag,
+                    znear=self.config.znear, zfar=self.config.zfar)
+                elev_rad = math.radians(el_deg)
+                d = self.config.camera_distance
+                camera_pose = np.array([
+                    [1, 0, 0, 0],
+                    [0, math.cos(elev_rad), -math.sin(elev_rad), -d * math.sin(elev_rad)],
+                    [0, math.sin(elev_rad), math.cos(elev_rad),  d * math.cos(elev_rad)],
+                    [0, 0, 0, 1]
+                ])
+                scene.add(camera, pose=camera_pose)
+
+                color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+                grid[az_idx][el_idx] = Image.fromarray(color, "RGBA")
+
+                count += 1
+                if progress_callback:
+                    progress_callback(count, total)
+
+        renderer.delete()
+        return grid, azimuths, elevations
 
     def _add_coordinate_axes(self, scene: pyrender.Scene, rotation_matrix: np.ndarray, axis_length: float = 8.0):
         """Add coordinate axes to the scene for reference (X=red, Y=green, Z=blue)"""
