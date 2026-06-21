@@ -400,6 +400,72 @@ class VehicleRenderer:
         renderer.delete()
         return paths
 
+    def render_preview(self, colored_parts: ColoredVehicleParts,
+                       primary_rgba: Tuple[float, float, float, float],
+                       secondary_rgba: Tuple[float, float, float, float],
+                       azimuth_deg: float = 0.0,
+                       elevation_deg: float = 35.264,
+                       img_size: int = 256) -> 'Image.Image':
+        """Render a single frame at arbitrary azimuth/elevation, returning a PIL Image.
+
+        This avoids the full export pipeline — no files, no sprite sheets — making
+        it ideal for interactive preview controls.
+        """
+        az_rad = math.radians(azimuth_deg)
+        rotation_matrix = trimesh.transformations.rotation_matrix(az_rad, [0, 0, 1])
+
+        scene = pyrender.Scene(bg_color=self.config.background_color)
+
+        # Primary parts
+        if colored_parts.primary_parts:
+            combined = trimesh.util.concatenate(colored_parts.primary_parts)
+            rotated = combined.copy()
+            rotated.apply_transform(rotation_matrix)
+            material = pyrender.MetallicRoughnessMaterial(
+                baseColorFactor=primary_rgba, metallicFactor=0.0, roughnessFactor=1.0
+            )
+            scene.add(pyrender.Mesh.from_trimesh(rotated, material=material))
+
+        # Secondary parts
+        if colored_parts.secondary_parts:
+            combined = trimesh.util.concatenate(colored_parts.secondary_parts)
+            rotated = combined.copy()
+            rotated.apply_transform(rotation_matrix)
+            material = pyrender.MetallicRoughnessMaterial(
+                baseColorFactor=secondary_rgba, metallicFactor=0.0, roughnessFactor=1.0
+            )
+            scene.add(pyrender.Mesh.from_trimesh(rotated, material=material))
+
+        # Lighting
+        light = pyrender.DirectionalLight(intensity=self.config.light_intensity)
+        light_pose = np.array([
+            [1, 0, 0, self.config.light_position[0]],
+            [0, 1, 0, self.config.light_position[1]],
+            [0, 0, 1, self.config.light_position[2]],
+            [0, 0, 0, 1]
+        ])
+        scene.add(light, pose=light_pose)
+
+        # Camera with parameterised elevation
+        camera = pyrender.OrthographicCamera(
+            xmag=self.config.ortho_mag, ymag=self.config.ortho_mag,
+            znear=self.config.znear, zfar=self.config.zfar
+        )
+        elev_rad = math.radians(elevation_deg)
+        camera_pose = np.array([
+            [1, 0, 0, 0],
+            [0, math.cos(elev_rad), -math.sin(elev_rad), self.config.camera_y_offset],
+            [0, math.sin(elev_rad), math.cos(elev_rad), self.config.camera_distance],
+            [0, 0, 0, 1]
+        ])
+        scene.add(camera, pose=camera_pose)
+
+        renderer = pyrender.OffscreenRenderer(img_size, img_size)
+        color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        renderer.delete()
+
+        return Image.fromarray(color, "RGBA")
+
     def _add_coordinate_axes(self, scene: pyrender.Scene, rotation_matrix: np.ndarray, axis_length: float = 8.0):
         """Add coordinate axes to the scene for reference (X=red, Y=green, Z=blue)"""
         # Create axes as visible cylinders (scaled for vehicle size)
