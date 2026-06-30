@@ -17,20 +17,28 @@ The system is now organized into several modular components:
 2. **`rendering_engine.py`** - Rendering and export logic
    - 3D to 2D rendering with PyRender
    - Two-color vehicle system (hull + detail colors)
-   - Sprite sheet generation
+   - Sprite sheet generation (static and animated)
+   - Per-frame animation rendering (idle, firing, moving)
+   - Split-part GLB 3D mesh export (hull / turret / barrel / mobility)
    - Metadata export
    - Advanced debug view generation (13 axis-based views with coordinate axes)
 
-3. **`vehicle_pipeline.py`** - Main orchestration
+3. **`animation_definitions.py`** - Animation sequences
+   - Keyframe, sequence, and animation-set dataclasses
+   - Default idle / firing / moving animations per vehicle type
+   - Per-frame transforms for animated parts (turret, barrel, mobility)
+
+4. **`vehicle_pipeline.py`** - Main orchestration
    - High-level pipeline for vehicle generation
    - Batch processing capabilities
    - Preset configurations
    - Command-line interface
 
-4. **`gui_app.py`** - Graphical user interface
+5. **`gui_app.py`** - Graphical user interface
    - Vehicle selection and editing
    - Two-color system (hull color + detail color pickers)
-   - Real-time preview
+   - Interactive drag-to-rotate preview
+   - Optional 3D mesh (GLB) export
    - Batch generation with progress tracking
    - Configuration save/load
 
@@ -153,6 +161,30 @@ Advanced debug views help visualize vehicle geometry:
 - **X-axis rotations**: Vertical views (bottom to top)
 - **Y-axis rotations**: Camera roll/tilt variations
 
+### Sprite Animation
+
+Vehicles can be exported as animated sprite sheets with one row per animation
+sequence. Default sequences (`idle`, `firing`, `moving`) are defined in
+`animation_definitions.py` and selected automatically per vehicle type; the
+animated parts (turret, barrel, wheels/treads) move per frame. The resulting
+metadata includes an `animations` map describing each row (`row`, `frames`,
+`looping`).
+
+### 3D Mesh Export (GLB)
+
+Enable 3D export to write GLB meshes alongside the sprite sheet, split into
+separately animatable parts for game-engine use:
+
+- `<name>.glb` - combined mesh (for previewing)
+- `<name>_hull.glb` - body and non-animated detail
+- `<name>_turret.glb` - turret base (rotates to aim)
+- `<name>_barrel.glb` - gun barrel (recoils on firing)
+- `<name>_mobility.glb` - wheels / treads (spin with movement)
+
+In the GUI, tick **Export 3D meshes (GLB)**; via the API, set `export_3d=True`
+on the `VehicleSpec`. When enabled, the metadata gains a `meshes` entry with the
+exported file paths.
+
 ### Vehicle Parameters
 
 Each vehicle type has specific parameters you can customize:
@@ -234,11 +266,15 @@ Generated vehicles are organized as follows:
 ```
 out/vehicles/
 ├── vehicle_name/
-│   ├── vehicle_name_sheet.png    # Sprite sheet
+│   ├── vehicle_name_sheet.png    # Sprite sheet (one row per animation when animated)
 │   ├── vehicle_name.json         # Metadata
 │   ├── frames/                   # Individual direction frames
-│   │   ├── vehicle_name_00.png
+│   │   ├── vehicle_name_00.png   # (static) or per-animation subdirs when animated
 │   │   ├── vehicle_name_01.png
+│   │   └── ...
+│   ├── meshes/                   # GLB exports (only when 3D export is enabled)
+│   │   ├── vehicle_name.glb
+│   │   ├── vehicle_name_hull.glb
 │   │   └── ...
 │   └── debug_views/              # Debug camera angles
 │       ├── vehicle_name_top_view.png
@@ -276,6 +312,7 @@ Each vehicle includes a JSON metadata file:
 RTS-Unit-Generator/
 ├── vehicle_definitions.py     # Vehicle creation logic
 ├── rendering_engine.py        # Rendering and export
+├── animation_definitions.py   # Animation sequences
 ├── vehicle_pipeline.py        # Main pipeline
 ├── gui_app.py                 # GUI application
 ├── requirements.txt           # Dependencies
@@ -362,7 +399,8 @@ print('✓ Vehicle creation test passed')
 
 ## 🚀 Future Enhancements
 
-Potential improvements for the system:
+See [`ROADMAP.md`](ROADMAP.md) for the current shipped / planned status. Some
+potential improvements for the system:
 
 1. **More Vehicle Types**
    - Aircraft (helicopters, jets)
@@ -371,7 +409,7 @@ Potential improvements for the system:
    - Buildings and structures
 
 2. **Advanced Rendering**
-   - Animation support
+   - Animation support ✅ shipped (idle / firing / moving)
    - Particle effects
    - Multiple texture variants
    - Normal maps for lighting
@@ -380,7 +418,7 @@ Potential improvements for the system:
    - 3D preview window
    - Drag-and-drop vehicle editing
    - Batch operation templates
-   - Export to game engines
+   - Export to game engines ✅ GLB mesh export shipped
 
 4. **Performance Optimization**
    - Multi-threaded rendering
